@@ -1,0 +1,671 @@
+name: Build Obito
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Create project
+        run: |
+          set -e
+          mkdir -p "$(dirname 'Obito/app/build.gradle.kts')"
+          cat > 'Obito/app/build.gradle.kts' <<'OBITO_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.obito.app"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.obito.app"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              buildTypes { release { isMinifyEnabled = false } }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          OBITO_EOF
+          mkdir -p "$(dirname 'Obito/app/src/main/AndroidManifest.xml')"
+          cat > 'Obito/app/src/main/AndroidManifest.xml' <<'OBITO_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.READ_CONTACTS" />
+              <uses-permission android:name="android.permission.SEND_SMS" />
+              <uses-permission android:name="android.permission.CALL_PHONE" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+              <queries>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.LAUNCHER" />
+                  </intent>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService" />
+                  </intent>
+              </queries>
+
+              <application
+                  android:label="Obito"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".ObitoService"
+                      android:exported="false"
+                      android:foregroundServiceType="microphone" />
+
+                  <service
+                      android:name=".ObitoAccessibility"
+                      android:exported="true"
+                      android:label="Obito"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          OBITO_EOF
+          mkdir -p "$(dirname 'Obito/app/src/main/java/com/obito/app/MainActivity.kt')"
+          cat > 'Obito/app/src/main/java/com/obito/app/MainActivity.kt' <<'OBITO_EOF'
+          package com.obito.app
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+              private lateinit var btn: Button
+              private lateinit var status: TextView
+
+              private fun needed(): List<String> {
+                  val l = mutableListOf(
+                      Manifest.permission.RECORD_AUDIO,
+                      Manifest.permission.READ_CONTACTS,
+                      Manifest.permission.SEND_SMS,
+                      Manifest.permission.CALL_PHONE
+                  )
+                  if (Build.VERSION.SDK_INT >= 33) l.add(Manifest.permission.POST_NOTIFICATIONS)
+                  return l
+              }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER
+                      setPadding(48, 48, 48, 48)
+                      setBackgroundColor(Color.parseColor("#111111"))
+                  }
+                  val title = TextView(this).apply {
+                      text = "OBITO"
+                      textSize = 34f
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+                  }
+                  btn = Button(this).apply {
+                      textSize = 30f
+                      setTextColor(Color.WHITE)
+                      background = GradientDrawable().apply { shape = GradientDrawable.OVAL }
+                      layoutParams = LinearLayout.LayoutParams(620, 620).apply { setMargins(0, 80, 0, 80) }
+                      setOnClickListener { toggle() }
+                  }
+                  status = TextView(this).apply {
+                      textSize = 16f
+                      setTextColor(Color.LTGRAY)
+                      gravity = Gravity.CENTER
+                  }
+                  root.addView(title)
+                  root.addView(btn)
+                  root.addView(status)
+                  setContentView(root)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  refresh()
+              }
+
+              private fun refresh() {
+                  val on = ObitoService.running
+                  btn.text = if (on) "ON" else "OFF"
+                  (btn.background as GradientDrawable).setColor(Color.parseColor(if (on) "#2E7D32" else "#B71C1C"))
+                  status.text = if (on) "Obito sun raha hai.\nBolo: \"Obito, Instagram kholo\"" else "Obito band hai"
+              }
+
+              private fun accOn(): Boolean {
+                  val s = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
+                  return s.contains(packageName)
+              }
+
+              private fun toggle() {
+                  if (ObitoService.running) {
+                      stopService(Intent(this, ObitoService::class.java))
+                  } else {
+                      val missing = needed().filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+                      if (missing.isNotEmpty()) {
+                          requestPermissions(missing.toTypedArray(), 1)
+                          return
+                      }
+                      if (!accOn()) {
+                          Toast.makeText(this, "Obito ko Accessibility me ON karein, phir wapas aakar ON dabayein", Toast.LENGTH_LONG).show()
+                          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                          return
+                      }
+                      startForegroundService(Intent(this, ObitoService::class.java))
+                  }
+                  Handler(Looper.getMainLooper()).postDelayed({ refresh() }, 400)
+              }
+
+              override fun onRequestPermissionsResult(code: Int, p: Array<out String>, r: IntArray) {
+                  super.onRequestPermissionsResult(code, p, r)
+                  if (r.isNotEmpty() && r.all { it == PackageManager.PERMISSION_GRANTED }) toggle()
+                  else Toast.makeText(this, "Saari permissions zaroori hain", Toast.LENGTH_LONG).show()
+              }
+          }
+          OBITO_EOF
+          mkdir -p "$(dirname 'Obito/app/src/main/java/com/obito/app/ObitoAccessibility.kt')"
+          cat > 'Obito/app/src/main/java/com/obito/app/ObitoAccessibility.kt' <<'OBITO_EOF'
+          package com.obito.app
+
+          import android.accessibilityservice.AccessibilityService
+          import android.content.Intent
+          import android.os.Bundle
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+
+          class ObitoAccessibility : AccessibilityService() {
+
+              companion object {
+                  @Volatile var instance: ObitoAccessibility? = null
+              }
+
+              override fun onServiceConnected() { instance = this }
+              override fun onUnbind(intent: Intent?): Boolean { instance = null; return super.onUnbind(intent) }
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+              override fun onInterrupt() {}
+
+              private fun find(n: AccessibilityNodeInfo?, p: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+                  if (n == null) return null
+                  if (p(n)) return n
+                  for (i in 0 until n.childCount) {
+                      val r = find(n.getChild(i), p)
+                      if (r != null) return r
+                  }
+                  return null
+              }
+
+              private fun clickUp(n: AccessibilityNodeInfo?): Boolean {
+                  var x = n
+                  while (x != null) {
+                      if (x.isClickable) return x.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                      x = x.parent
+                  }
+                  return false
+              }
+
+              fun clickText(t: String): Boolean {
+                  val root = rootInActiveWindow ?: return false
+                  val n = find(root) {
+                      it.text?.toString()?.contains(t, true) == true ||
+                          it.contentDescription?.toString()?.contains(t, true) == true
+                  }
+                  return clickUp(n)
+              }
+
+              fun clickSend(): Boolean {
+                  val root = rootInActiveWindow ?: return false
+                  val n = find(root) {
+                      val d = it.contentDescription?.toString()
+                      d.equals("Send", true) || d == "भेजें"
+                  }
+                  return clickUp(n)
+              }
+
+              fun typeText(t: String): Boolean {
+                  val root = rootInActiveWindow ?: return false
+                  val f = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+                  val args = Bundle()
+                  args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, t)
+                  return f.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+              }
+
+              fun scroll(forward: Boolean): Boolean {
+                  val root = rootInActiveWindow ?: return false
+                  val n = find(root) { it.isScrollable } ?: return false
+                  return n.performAction(
+                      if (forward) AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                      else AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                  )
+              }
+          }
+          OBITO_EOF
+          mkdir -p "$(dirname 'Obito/app/src/main/java/com/obito/app/ObitoService.kt')"
+          cat > 'Obito/app/src/main/java/com/obito/app/ObitoService.kt' <<'OBITO_EOF'
+          package com.obito.app
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.accessibilityservice.AccessibilityService
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.provider.ContactsContract
+          import android.speech.RecognitionListener
+          import android.speech.RecognizerIntent
+          import android.speech.SpeechRecognizer
+          import android.speech.tts.TextToSpeech
+          import android.speech.tts.UtteranceProgressListener
+          import android.telephony.SmsManager
+          import java.util.Locale
+
+          class ObitoService : Service(), TextToSpeech.OnInitListener {
+
+              companion object {
+                  @Volatile var running = false
+              }
+
+              private enum class St { IDLE, COMMAND, CONFIRM, ASK_NAME, ASK_BODY }
+
+              private class Action(val question: String, val run: () -> String)
+
+              private var st = St.IDLE
+              private var pending: Action? = null
+              private var msgName = ""
+              private var msgWhats = false
+              private var active = true
+              private var ttsReady = false
+              private var tts: TextToSpeech? = null
+              private lateinit var sr: SpeechRecognizer
+              private val h = Handler(Looper.getMainLooper())
+
+              // ---- shabd-suchi ----
+              private val wake = listOf("obito", "ओबिटो", "ओबीटो", "ओबितो", "ओबीतो", "obeeto", "obitu", "ओबिटू", "ओबिट")
+              private val openW = listOf("खोलो", "खोल", "खोलिए", "kholo", "khol", "open", "ओपन", "चालू", "चलाओ")
+              private val msgW = listOf("मैसेज", "message", "मेसेज", "sms", "संदेश")
+              private val waW = listOf("व्हाट्सएप", "व्हाट्सऐप", "वाट्सएप", "व्हाट्सअप", "whatsapp", "वॉट्सएप")
+              private val callW = listOf("कॉल", "call", "फोन करो", "फ़ोन करो", "phone karo")
+              private val backW = listOf("वापस", "पीछे", "back")
+              private val homeW = listOf("होम", "home")
+              private val scrollW = listOf("स्क्रॉल", "स्क्रोल", "scroll", "नीचे", "ऊपर")
+              private val typeW = listOf("लिखो", "टाइप", "type", "likho")
+              private val clickW = listOf("दबाओ", "क्लिक", "click", "टैप", "tap", "press")
+              private val yesW = listOf("हाँ", "हां", "हा", "yes", "ok", "okay", "ओके", "ठीक", "कर दो", "करो", "haan", "kar do")
+              private val noW = listOf("नहीं", "नही", "नो", "no", "nahi", "mat", "मत", "cancel", "रुको")
+              private val stop = setOf(
+                  "को", "ko", "ऐप", "app", "एप", "एप्प", "please", "प्लीज", "करो", "कर", "दो", "भेजो", "भेज", "bhejo",
+                  "भेजिए", "भेजना", "मैसेज", "message", "मेसेज", "sms", "संदेश", "व्हाट्सएप", "व्हाट्सऐप", "वाट्सएप",
+                  "व्हाट्सअप", "whatsapp", "वॉट्सएप", "पर", "on", "से", "में", "obito", "ओबिटो", "कॉल", "call",
+                  "फोन", "फ़ोन", "phone", "karo", "लगाओ", "खोलो", "खोल", "खोलिए", "kholo", "khol", "open", "ओपन",
+                  "चालू", "चलाओ"
+              )
+              private val aliases = listOf(
+                  "इंस्टाग्राम" to "instagram", "इंस्टा" to "instagram", "व्हाट्सएप" to "whatsapp", "व्हाट्सऐप" to "whatsapp",
+                  "वाट्सएप" to "whatsapp", "व्हाट्सअप" to "whatsapp", "वॉट्सएप" to "whatsapp", "यूट्यूब" to "youtube",
+                  "फेसबुक" to "facebook", "कैमरा" to "camera", "गैलरी" to "gallery", "सेटिंग" to "settings",
+                  "क्रोम" to "chrome", "जीमेल" to "gmail", "मैप" to "maps", "स्नैपचैट" to "snapchat",
+                  "टेलीग्राम" to "telegram", "स्पॉटिफाई" to "spotify", "कैलकुलेटर" to "calculator", "घड़ी" to "clock",
+                  "फोन" to "phone", "फ़ोटो" to "photos", "फोटो" to "photos", "नेटफ्लिक्स" to "netflix",
+                  "अमेज़न" to "amazon", "अमेजन" to "amazon", "पेटीएम" to "paytm", "फोनपे" to "phonepe",
+                  "प्ले स्टोर" to "play store", "गूगल" to "google", "ट्विटर" to "x"
+              )
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  running = true
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(NotificationChannel("obito", "Obito", NotificationManager.IMPORTANCE_LOW))
+                  val n = Notification.Builder(this, "obito")
+                      .setContentTitle("Obito chalu hai")
+                      .setContentText("Awaaz sun raha hai")
+                      .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                      .build()
+                  if (Build.VERSION.SDK_INT >= 29) startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                  else startForeground(1, n)
+
+                  sr = SpeechRecognizer.createSpeechRecognizer(this)
+                  sr.setRecognitionListener(listener)
+                  tts = TextToSpeech(this, this)
+              }
+
+              override fun onInit(status: Int) {
+                  ttsReady = status == TextToSpeech.SUCCESS
+                  tts?.language = Locale("hi", "IN")
+                  tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                      override fun onStart(id: String?) {}
+                      override fun onDone(id: String?) { h.post { listen() } }
+                      @Deprecated("Deprecated in Java")
+                      override fun onError(id: String?) { h.post { listen() } }
+                  })
+                  listen()
+              }
+
+              override fun onDestroy() {
+                  active = false
+                  running = false
+                  try { sr.destroy() } catch (_: Exception) {}
+                  tts?.shutdown()
+                  super.onDestroy()
+              }
+
+              // ---- suna aur bola ----
+              private fun listen() {
+                  if (!active) return
+                  val i = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                      putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
+                      putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+                  }
+                  try { sr.startListening(i) } catch (e: Exception) { h.postDelayed({ listen() }, 1500) }
+              }
+
+              private fun speak(t: String) {
+                  if (!active) return
+                  sr.cancel()
+                  if (!ttsReady) { h.postDelayed({ listen() }, 500); return }
+                  tts?.speak(t, TextToSpeech.QUEUE_FLUSH, null, "u" + System.nanoTime())
+              }
+
+              private val listener = object : RecognitionListener {
+                  override fun onReadyForSpeech(p: Bundle?) {}
+                  override fun onBeginningOfSpeech() {}
+                  override fun onRmsChanged(v: Float) {}
+                  override fun onBufferReceived(b: ByteArray?) {}
+                  override fun onEndOfSpeech() {}
+                  override fun onPartialResults(p: Bundle?) {}
+                  override fun onEvent(t: Int, p: Bundle?) {}
+                  override fun onError(e: Int) {
+                      if (!active) return
+                      if (st != St.IDLE) {
+                          st = St.IDLE; pending = null
+                          speak("Kuch suna nahi, cancel kiya")
+                      } else h.postDelayed({ sr.cancel(); listen() }, 500)
+                  }
+                  override fun onResults(r: Bundle?) {
+                      val t = r?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull()?.lowercase()?.trim() ?: ""
+                      handle(t)
+                  }
+              }
+
+              private fun handle(t: String) {
+                  when (st) {
+                      St.IDLE -> {
+                          val w = wake.firstOrNull { t.contains(it) }
+                          if (w == null) { listen(); return }
+                          val rest = t.substringAfter(w).trim()
+                          if (rest.isEmpty()) { st = St.COMMAND; speak("Ji, boliye") } else command(rest)
+                      }
+                      St.COMMAND -> command(t)
+                      St.CONFIRM -> {
+                          val a = pending
+                          pending = null
+                          st = St.IDLE
+                          if (a != null && isYes(t)) {
+                              val msg = try { a.run() } catch (e: Exception) { "Kuch gadbad ho gayi" }
+                              speak(msg)
+                          } else speak("Theek hai, cancel kiya")
+                      }
+                      St.ASK_NAME -> { msgName = t; st = St.ASK_BODY; speak("Kya likhun?") }
+                      St.ASK_BODY -> buildMessage(msgName, t, msgWhats)
+                  }
+              }
+
+              private fun isYes(t: String): Boolean {
+                  if (noW.any { t.contains(it) }) return false
+                  return yesW.any { t.contains(it) }
+              }
+
+              private fun has(t: String, l: List<String>) = l.any { t.contains(it) }
+              private fun tokens(t: String) = t.split(" ", "\t").filter { it.isNotBlank() }
+              private fun after(t: String, l: List<String>): String {
+                  val k = l.filter { t.contains(it) }.maxByOrNull { it.length } ?: return t
+                  return t.substringAfter(k).trim()
+              }
+
+              // ---- aadesh samajhna ----
+              private fun command(t: String) {
+                  st = St.IDLE
+
+                  if (has(t, msgW) || has(t, waW)) {
+                      msgWhats = has(t, waW)
+                      val m = Regex("(.+?)\\s+(?:को|ko)\\s+(.*)").find(t)
+                      if (m != null) {
+                          val name = tokens(m.groupValues[1]).filterNot { it in stop }.joinToString(" ")
+                          val body = tokens(m.groupValues[2]).dropWhile { it in stop }.dropLastWhile { it in stop }.joinToString(" ")
+                          if (name.isNotEmpty() && body.isNotEmpty()) { buildMessage(name, body, msgWhats); return }
+                      }
+                      st = St.ASK_NAME
+                      speak("Kisko bhejna hai?")
+                      return
+                  }
+
+                  if (has(t, callW)) {
+                      val name = tokens(t).filterNot { it in stop }.joinToString(" ")
+                      val num = findNumber(name)
+                      if (num == null) { speak("$name ka number nahi mila"); return }
+                      ask(Action("$name ko call karun?") {
+                          launch(Intent(Intent.ACTION_CALL, Uri.parse("tel:$num")))
+                          "Call laga raha hoon"
+                      })
+                      return
+                  }
+
+                  if (has(t, openW)) {
+                      val name = tokens(t).filterNot { it in stop }.joinToString(" ")
+                      val app = findApp(name)
+                      if (app == null) { speak("$name naam ka app nahi mila"); return }
+                      ask(Action("${app.second} kholun?") {
+                          val i = packageManager.getLaunchIntentForPackage(app.first)
+                          if (i != null) { launch(i); "${app.second} khul gaya" } else "App nahi khul paya"
+                      })
+                      return
+                  }
+
+                  if (has(t, scrollW)) {
+                      val down = !t.contains("ऊपर") && !t.contains("up")
+                      ask(Action(if (down) "Neeche scroll karun?" else "Upar scroll karun?") {
+                          val ok = ObitoAccessibility.instance?.scroll(down) == true
+                          if (ok) "Ho gaya" else "Scroll nahi ho paya"
+                      })
+                      return
+                  }
+
+                  if (has(t, backW)) {
+                      ask(Action("Peeche jaun?") { global(AccessibilityService.GLOBAL_ACTION_BACK) })
+                      return
+                  }
+                  if (has(t, homeW)) {
+                      ask(Action("Home screen par jaun?") { global(AccessibilityService.GLOBAL_ACTION_HOME) })
+                      return
+                  }
+
+                  if (has(t, typeW)) {
+                      val text = after(t, typeW)
+                      if (text.isEmpty()) { speak("Kya likhun?"); return }
+                      ask(Action("Ye likhun: $text. Theek hai?") {
+                          if (ObitoAccessibility.instance?.typeText(text) == true) "Likh diya" else "Likh nahi paya, pehle text box dabayein"
+                      })
+                      return
+                  }
+
+                  if (has(t, clickW)) {
+                      val target = tokens(after(t, clickW)).filterNot { it in stop }.joinToString(" ")
+                      if (target.isEmpty()) { speak("Kya dabana hai?"); return }
+                      ask(Action("$target dabaun?") {
+                          if (ObitoAccessibility.instance?.clickText(target) == true) "Dabaa diya" else "$target screen par nahi mila"
+                      })
+                      return
+                  }
+
+                  speak("Samajh nahi aaya")
+              }
+
+              private fun ask(a: Action) {
+                  pending = a
+                  st = St.CONFIRM
+                  speak(a.question)
+              }
+
+              private fun global(code: Int): String =
+                  if (ObitoAccessibility.instance?.performGlobalAction(code) == true) "Ho gaya"
+                  else "Accessibility chalu nahi hai"
+
+              private fun launch(i: Intent) {
+                  i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                  val c: Context = ObitoAccessibility.instance ?: this
+                  c.startActivity(i)
+              }
+
+              // ---- app / contact / message ----
+              private fun findApp(raw: String): Pair<String, String>? {
+                  var n = raw.trim()
+                  for ((k, v) in aliases) if (n.contains(k)) { n = v; break }
+                  if (n.isEmpty()) return null
+                  val pm = packageManager
+                  val q = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                  for (ri in pm.queryIntentActivities(q, 0)) {
+                      val label = ri.loadLabel(pm).toString()
+                      if (label.lowercase().contains(n)) return ri.activityInfo.packageName to label
+                  }
+                  return null
+              }
+
+              private fun findNumber(name: String): String? {
+                  val digits = name.filter { it.isDigit() }
+                  if (digits.length >= 10) return digits
+                  if (name.isBlank()) return null
+                  contentResolver.query(
+                      ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                      arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
+                      "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
+                      arrayOf("%$name%"), null
+                  )?.use { if (it.moveToFirst()) return it.getString(0) }
+                  return null
+              }
+
+              private fun buildMessage(name: String, body: String, wa: Boolean) {
+                  st = St.IDLE
+                  val num = findNumber(name)
+                  if (num == null) { speak("$name ka number nahi mila"); return }
+                  val how = if (wa) "WhatsApp" else "SMS"
+                  ask(Action("$name ko $how bheju: $body. Theek hai?") {
+                      if (wa) {
+                          var n = num.filter { it.isDigit() }
+                          if (n.length == 10) n = "91$n"
+                          val i = Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/$n?text=${Uri.encode(body)}"))
+                          i.setPackage("com.whatsapp")
+                          launch(i)
+                          h.postDelayed({ ObitoAccessibility.instance?.clickSend() }, 3500)
+                          "WhatsApp message bhej raha hoon"
+                      } else {
+                          @Suppress("DEPRECATION")
+                          val sm = SmsManager.getDefault()
+                          sm.sendMultipartTextMessage(num, null, sm.divideMessage(body), null, null)
+                          "SMS bhej diya"
+                      }
+                  })
+              }
+          }
+          OBITO_EOF
+          mkdir -p "$(dirname 'Obito/app/src/main/res/values/strings.xml')"
+          cat > 'Obito/app/src/main/res/values/strings.xml' <<'OBITO_EOF'
+          <resources>
+              <string name="acc_desc">Obito aapki awaaz se phone chalane ke liye apps kholta, tap karta aur scroll karta hai.</string>
+          </resources>
+          OBITO_EOF
+          mkdir -p "$(dirname 'Obito/app/src/main/res/xml/accessibility_config.xml')"
+          cat > 'Obito/app/src/main/res/xml/accessibility_config.xml' <<'OBITO_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagDefault|flagReportViewIds"
+              android:canRetrieveWindowContent="true"
+              android:description="@string/acc_desc"
+              android:notificationTimeout="100" />
+          OBITO_EOF
+          mkdir -p "$(dirname 'Obito/build.gradle.kts')"
+          cat > 'Obito/build.gradle.kts' <<'OBITO_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          OBITO_EOF
+          mkdir -p "$(dirname 'Obito/gradle.properties')"
+          cat > 'Obito/gradle.properties' <<'OBITO_EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          kotlin.code.style=official
+          OBITO_EOF
+          mkdir -p "$(dirname 'Obito/settings.gradle.kts')"
+          cat > 'Obito/settings.gradle.kts' <<'OBITO_EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "Obito"
+          include(":app")
+          OBITO_EOF
+      - name: Build APK
+        working-directory: Obito
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: obito-apk
+          path: Obito/app/build/outputs/apk/debug/app-debug.apk
